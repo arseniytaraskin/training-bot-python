@@ -17,83 +17,112 @@ sheet = client.open_by_key(config.SHEET_ID).sheet1
 
 QUESTION, ANSWER = range(2)
 
-async def start(update: Update, context: CallbackContext) -> int:
-    await update.message.reply_text('Привет! Я твой помощник по курсу Python. Готов к заданиям? Напиши /next, чтобы получить первое задание.')
-    return QUESTION
+def create_user_table():
+    conn = sqlite3.connect('students_progress.db')
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY,
+            username TEXT NOT NULL,
+            password TEXT NOT NULL
+        )
+    ''')
+    conn.commit()
+    conn.close()
 
-async def next_task(update: Update, context: CallbackContext) -> int:
-    student_id = update.message.from_user.id
-    username = update.message.from_user.username
+create_user_table()
+
+async def start(update: Update, context: CallbackContext) -> None:
+    await update.message.reply_text(
+        'Привет! Выберите действие:\n'
+        '1. /register - Регистрация\n'
+        '2. /login - Вход'
+    )
+
+async def register(update: Update, context: CallbackContext) -> None:
+    await update.message.reply_text('Введите имя пользователя:')
+    return 'USERNAME'
+
+async def get_username(update: Update, context: CallbackContext) -> None:
+    context.user_data['username'] = update.message.text
+    await update.message.reply_text('Введите пароль:')
+    return 'PASSWORD'
+
+async def get_password(update: Update, context: CallbackContext) -> None:
+    username = context.user_data['username']
+    password = update.message.text
 
     conn = sqlite3.connect('students_progress.db')
     cursor = conn.cursor()
 
-    cursor.execute('SELECT completed_tasks FROM progress WHERE student_id = ?', (student_id,))
-    result = cursor.fetchone()
-
-    if result:
-        completed_tasks = result[0]
-    else:
-        completed_tasks = 0
-        cursor.execute('INSERT INTO progress (student_id, username, completed_tasks, rating) VALUES (?, ?, ?, ?)', (student_id, username, 0, 0))
-        conn.commit()
-
-    task_row = completed_tasks + 2
-    task = sheet.row_values(task_row)
-
-    if task:
-        context.user_data['task'] = task
-        await update.message.reply_text(f'Задание {completed_tasks + 1}: {task[1]}')
-        conn.close()
-        return ANSWER
-    else:
-        await update.message.reply_text('Все задания выполнены!')
+    cursor.execute('SELECT * FROM users WHERE username = ?', (username,))
+    if cursor.fetchone() is not None:
+        await update.message.reply_text('Этот пользователь уже существует. Попробуйте другое имя пользователя или войдите в свою учетную запись.')
         conn.close()
         return ConversationHandler.END
 
-async def check_answer(update: Update, context: CallbackContext) -> int:
-    student_id = update.message.from_user.id
-    answer = update.message.text
-    task = context.user_data['task']
-    correct_answer = task[2] if len(task) > 2 else None
-    points = int(task[3]) if len(task) > 3 else 0
+    cursor.execute('INSERT INTO users (username, password) VALUES (?, ?)', (username, password))
+    conn.commit()
+    conn.close()
+    await update.message.reply_text('Вы успешно зарегистрированы! Вы можете войти, используя ваше имя пользователя и пароль.')
+    return ConversationHandler.END
+
+async def login(update: Update, context: CallbackContext) -> None:
+    await update.message.reply_text('Введите имя пользователя для входа:')
+    return 'LOGIN_USERNAME'
+
+async def get_login_username(update: Update, context: CallbackContext) -> None:
+    context.user_data['login_username'] = update.message.text
+    await update.message.reply_text('Введите пароль:')
+    return 'LOGIN_PASSWORD'
+
+async def get_login_password(update: Update, context: CallbackContext) -> None:
+    username = context.user_data['login_username']
+    password = update.message.text
 
     conn = sqlite3.connect('students_progress.db')
     cursor = conn.cursor()
 
-    if correct_answer and answer.strip() == correct_answer:
-        cursor.execute('UPDATE progress SET completed_tasks = completed_tasks + 1, rating = rating + ? WHERE student_id = ?', (points, student_id))
-        await update.message.reply_text('Правильно! Ты получаешь баллы!')
-    else:
-        cursor.execute('UPDATE progress SET completed_tasks = completed_tasks + 1 WHERE student_id = ?', (student_id,))
-        await update.message.reply_text('Ответ получен. Следующее задание доступно с командой /next')
+    cursor.execute('SELECT * FROM users WHERE username = ? AND password = ?', (username, password))
+    if cursor.fetchone() is None:
+        await update.message.reply_text('Неверное имя пользователя или пароль. Попробуйте еще раз.')
+        conn.close()
+        return ConversationHandler.END
 
-    conn.commit()
+    await update.message.reply_text('Вы успешно вошли в свою учетную запись!')
     conn.close()
     return ConversationHandler.END
 
 async def cancel(update: Update, context: CallbackContext) -> int:
-    await update.message.reply_text('Задание отменено. Напиши /next для нового задания.')
+    await update.message.reply_text('Операция отменена.')
     return ConversationHandler.END
 
 def main() -> None:
     application = Application.builder().token(config.TELEGRAM_BOT_TOKEN).build()
 
-    conv_handler = ConversationHandler(
-        entry_points=[CommandHandler('start', start), CommandHandler('next', next_task)],
+    conv_handler_registration = ConversationHandler(
+        entry_points=[CommandHandler('register', register)],
         states={
-            QUESTION: [CommandHandler('next', next_task)],
-            ANSWER: [MessageHandler(filters.TEXT & ~filters.COMMAND, check_answer)]
+            'USERNAME': [MessageHandler(filters.TEXT & ~filters.COMMAND, get_username)],
+            'PASSWORD': [MessageHandler(filters.TEXT & ~filters.COMMAND, get_password)],
         },
         fallbacks=[CommandHandler('cancel', cancel)],
     )
 
-    application.add_handler(conv_handler)
+    conv_handler_login = ConversationHandler(
+        entry_points=[CommandHandler('login', login)],
+        states={
+            'LOGIN_USERNAME': [MessageHandler(filters.TEXT & ~filters.COMMAND, get_login_username)],
+            'LOGIN_PASSWORD': [MessageHandler(filters.TEXT & ~filters.COMMAND, get_login_password)],
+        },
+        fallbacks=[CommandHandler('cancel', cancel)],
+    )
+
+    application.add_handler(CommandHandler('start', start))
+    application.add_handler(conv_handler_registration)
+    application.add_handler(conv_handler_login)
 
     application.run_polling()
 
 if __name__ == '__main__':
     main()
-
-
-
